@@ -116,6 +116,12 @@ ASSET_MAP = {
     "USDCHF=X": {"name": "USD/CHF", "base": "USD", "quote": "CHF", "cftc": "SWISS FRANC", "inv_cftc": True},
     "AUDJPY=X": {"name": "AUD/JPY", "base": "AUD", "quote": "JPY", "cftc": None},
     "EURJPY=X": {"name": "EUR/JPY", "base": "EUR", "quote": "JPY", "cftc": None},
+    "EURCHF=X": {"name": "EUR/CHF", "base": "EUR", "quote": "CHF", "cftc": None},
+    "EURCAD=X": {"name": "EUR/CAD", "base": "EUR", "quote": "CAD", "cftc": None},
+    "GBPCAD=X": {"name": "GBP/CAD", "base": "GBP", "quote": "CAD", "cftc": None},
+    "EURNZD=X": {"name": "EUR/NZD", "base": "EUR", "quote": "NZD", "cftc": None},
+    "EURAUD=X": {"name": "EUR/AUD", "base": "EUR", "quote": "AUD", "cftc": None},
+    "EURGBP=X": {"name": "EUR/GBP", "base": "EUR", "quote": "GBP", "cftc": None},
     "^GSPC":    {"name": "S&P 500", "base": "USD", "quote": "USD", "cftc": "E-MINI S&P 500"},
     "GC=F":     {"name": "GOLD",    "base": "USD", "quote": "USD", "cftc": "GOLD"},
 }
@@ -125,17 +131,37 @@ def get_banner_data(zone_key):
     try:
         fred = Fred(api_key=FRED_API_KEY)
         codes = MACRO_ZONES_DISPLAY[zone_key]
-        def safe_get(code, change_type="last"):
+        def safe_get(code, change_type="last", curr=None):
             try:
-                s = fred.get_series(code)
-                if change_type == "last": return s.iloc[-1]
-                elif change_type == "yoy": return s.pct_change(12).iloc[-1] * 100
-            except: return 0.0
+                s = fred.get_series(code).dropna()
+                if len(s) < 2:
+                    return 0.0
+                if change_type == "yoy":
+                    # Determine frequency based on indicator and currency
+                    if "GDP" in code.upper():
+                        freq = 4  # Quarterly
+                    elif "CPI" in code.upper():
+                        freq = 12  # Annual YoY
+                    else:
+                        freq = 12
+                    # Avoid extreme values by limiting CPI YoY range
+                    val = s.pct_change(freq).iloc[-1] * 100
+                    if "CPI" in code.upper() and (val < -5 or val > 20):
+                        # fallback to last available monthly change if too extreme
+                        val = s.diff(12).iloc[-1] / s.shift(12).iloc[-1] * 100
+                    return val
+                return s.iloc[-1]
+            except:
+                return 0.0
         return {
-            "Rate": safe_get(codes["Rate"]), "CPI": safe_get(codes["CPI"], "yoy"),
-            "Unemp": safe_get(codes["Unemp"]), "GDP": safe_get(codes["GDP"], "yoy"), "M2": safe_get(codes["M2"], "yoy")
+            "Rate": safe_get(codes["Rate"]), 
+            "CPI": safe_get(codes["CPI"], "yoy"),
+            "Unemp": safe_get(codes["Unemp"]), 
+            "GDP": safe_get(codes["GDP"], "yoy"), 
+            "M2": safe_get(codes["M2"], "yoy")
         }
-    except: return None
+    except: 
+        return None
 
 @st.cache_data(ttl=3600)
 def get_macro_db():
@@ -145,13 +171,25 @@ def get_macro_db():
         d = {}
         for k, code in codes.items():
             try:
-                s = fred.get_series(code)
-                val = s.iloc[-1]
-                if k == 'GDP' or k == 'CPI':
-                    if val > 50: d[k] = s.pct_change(4 if k=='GDP' else 12).iloc[-1] * 100
-                    else: d[k] = val
-                else: d[k] = val
-            except: d[k] = 0.0
+                s = fred.get_series(code).dropna()
+                if len(s) < 2:
+                    d[k] = 0.0
+                    continue
+                if k == 'GDP':
+                    # Quarterly GDP -> YoY = 4 periods, Monthly -> 12 periods
+                    freq = 4 if curr in ['USD','JPY','EUR','GBP'] else 4
+                    d[k] = s.pct_change(freq).iloc[-1] * 100
+                elif k == 'CPI':
+                    # Apply same logic as in safe_get for banner
+                    val = s.pct_change(12).iloc[-1] * 100
+                    if (val < -5 or val > 20):
+                        # fallback to last available monthly change if too extreme
+                        val = s.diff(12).iloc[-1] / s.shift(12).iloc[-1] * 100
+                    d[k] = val
+                else:
+                    d[k] = s.iloc[-1]
+            except: 
+                d[k] = 0.0
         db[curr] = d
     return db
 
@@ -182,7 +220,7 @@ def get_yield_curves():
 def get_dxy_fred():
     try:
         fred = Fred(api_key=FRED_API_KEY)
-        dxy = fred.get_series("DTWEXM")  # Traditional DXY (Major Currencies Index)
+        dxy = fred.get_series("RTWEXBGS")  # Traditional DXY (Major Currencies Index)
         return dxy
     except:
         return None
@@ -272,7 +310,43 @@ def calculate_matrix_row(ticker, info, macro, cot, market):
             delta = c.diff()
             rs = (delta.where(delta>0,0)).rolling(14).mean() / (-delta.where(delta<0,0)).rolling(14).mean()
             rsi = 100 - (100/(1+rs)).iloc[-1]
-            trend = 1 if price > c.rolling(200).mean().iloc[-1] else -1
+
+            # --- New Trend Indicators ---
+            # Moving Averages
+            ma20 = c.rolling(20).mean()
+            ma50 = c.rolling(50).mean()
+            ma200 = c.rolling(200).mean()
+
+            # 1. Slope of MA20
+            slope20 = ma20.diff().iloc[-1]
+            slope_s = 1 if slope20 > 0 else -1
+
+            # 2. MA50 / MA200 Crossover
+            cross_s = 1 if ma50.iloc[-1] > ma200.iloc[-1] else -1
+
+            # 3. ADX Calculation
+            high = df['High']
+            low = df['Low']
+            close = df['Close']
+
+            plus_dm = (high.diff().where(lambda x: x > 0, 0)).fillna(0)
+            minus_dm = (-low.diff().where(lambda x: x < 0, 0)).fillna(0)
+            tr1 = high - low
+            tr2 = (high - close.shift()).abs()
+            tr3 = (low - close.shift()).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+            atr = tr.rolling(14).mean()
+            plus_di = (plus_dm.rolling(14).mean() / atr) * 100
+            minus_di = (minus_dm.rolling(14).mean() / atr) * 100
+
+            dx = ((plus_di - minus_di).abs() / (plus_di + minus_di)) * 100
+            adx = dx.rolling(14).mean().iloc[-1]
+
+            adx_s = 1 if adx > 25 else -1
+
+            # Final Trend Score
+            trend = slope_s + cross_s + adx_s
     except: pass
 
     # COT
@@ -418,7 +492,7 @@ def main():
         cols[0].metric("Taux Directeur", f"{banner['Rate']:.2f}%")
         cols[1].metric("Inflation (CPI)", f"{banner['CPI']:.1f}%")
         cols[2].metric("Chômage", f"{banner['Unemp']:.1f}%")
-        cols[3].metric("GDP (YoY)", f"{banner['GDP']:.1f}%")
+        cols[3].metric("GDP (YoY)", f"{banner['GDP']:.2f}%")
         cols[4].metric("M2 Supply", f"{banner['M2']:.1f}%")
 
     st.markdown("---")
