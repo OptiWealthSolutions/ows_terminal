@@ -116,12 +116,6 @@ ASSET_MAP = {
     "USDCHF=X": {"name": "USD/CHF", "base": "USD", "quote": "CHF", "cftc": "SWISS FRANC", "inv_cftc": True},
     "AUDJPY=X": {"name": "AUD/JPY", "base": "AUD", "quote": "JPY", "cftc": None},
     "EURJPY=X": {"name": "EUR/JPY", "base": "EUR", "quote": "JPY", "cftc": None},
-    "EURCHF=X": {"name": "EUR/CHF", "base": "EUR", "quote": "CHF", "cftc": None},
-    "EURCAD=X": {"name": "EUR/CAD", "base": "EUR", "quote": "CAD", "cftc": None},
-    "GBPCAD=X": {"name": "GBP/CAD", "base": "GBP", "quote": "CAD", "cftc": None},
-    "EURNZD=X": {"name": "EUR/NZD", "base": "EUR", "quote": "NZD", "cftc": None},
-    "EURAUD=X": {"name": "EUR/AUD", "base": "EUR", "quote": "AUD", "cftc": None},
-    "EURGBP=X": {"name": "EUR/GBP", "base": "EUR", "quote": "GBP", "cftc": None},
     "^GSPC":    {"name": "S&P 500", "base": "USD", "quote": "USD", "cftc": "E-MINI S&P 500"},
     "GC=F":     {"name": "GOLD",    "base": "USD", "quote": "USD", "cftc": "GOLD"},
 }
@@ -131,37 +125,17 @@ def get_banner_data(zone_key):
     try:
         fred = Fred(api_key=FRED_API_KEY)
         codes = MACRO_ZONES_DISPLAY[zone_key]
-        def safe_get(code, change_type="last", curr=None):
+        def safe_get(code, change_type="last"):
             try:
-                s = fred.get_series(code).dropna()
-                if len(s) < 2:
-                    return 0.0
-                if change_type == "yoy":
-                    # Determine frequency based on indicator and currency
-                    if "GDP" in code.upper():
-                        freq = 4  # Quarterly
-                    elif "CPI" in code.upper():
-                        freq = 12  # Annual YoY
-                    else:
-                        freq = 12
-                    # Avoid extreme values by limiting CPI YoY range
-                    val = s.pct_change(freq).iloc[-1] * 100
-                    if "CPI" in code.upper() and (val < -5 or val > 20):
-                        # fallback to last available monthly change if too extreme
-                        val = s.diff(12).iloc[-1] / s.shift(12).iloc[-1] * 100
-                    return val
-                return s.iloc[-1]
-            except:
-                return 0.0
+                s = fred.get_series(code)
+                if change_type == "last": return s.iloc[-1]
+                elif change_type == "yoy": return s.pct_change(12).iloc[-1] * 100
+            except: return 0.0
         return {
-            "Rate": safe_get(codes["Rate"]), 
-            "CPI": safe_get(codes["CPI"], "yoy"),
-            "Unemp": safe_get(codes["Unemp"]), 
-            "GDP": safe_get(codes["GDP"], "yoy"), 
-            "M2": safe_get(codes["M2"], "yoy")
+            "Rate": safe_get(codes["Rate"]), "CPI": safe_get(codes["CPI"], "yoy"),
+            "Unemp": safe_get(codes["Unemp"]), "GDP": safe_get(codes["GDP"], "yoy"), "M2": safe_get(codes["M2"], "yoy")
         }
-    except: 
-        return None
+    except: return None
 
 @st.cache_data(ttl=3600)
 def get_macro_db():
@@ -171,28 +145,15 @@ def get_macro_db():
         d = {}
         for k, code in codes.items():
             try:
-                s = fred.get_series(code).dropna()
-                if len(s) < 2:
-                    d[k] = 0.0
-                    continue
-                if k == 'GDP':
-                    # Quarterly GDP -> YoY = 4 periods, Monthly -> 12 periods
-                    freq = 4 if curr in ['USD','JPY','EUR','GBP'] else 4
-                    d[k] = s.pct_change(freq).iloc[-1] * 100
-                elif k == 'CPI':
-                    # Apply same logic as in safe_get for banner
-                    val = s.pct_change(12).iloc[-1] * 100
-                    if (val < -5 or val > 20):
-                        # fallback to last available monthly change if too extreme
-                        val = s.diff(12).iloc[-1] / s.shift(12).iloc[-1] * 100
-                    d[k] = val
-                else:
-                    d[k] = s.iloc[-1]
-            except: 
-                d[k] = 0.0
+                s = fred.get_series(code)
+                val = s.iloc[-1]
+                if k == 'GDP' or k == 'CPI':
+                    if val > 50: d[k] = s.pct_change(4 if k=='GDP' else 12).iloc[-1] * 100
+                    else: d[k] = val
+                else: d[k] = val
+            except: d[k] = 0.0
         db[curr] = d
     return db
-
 
 @st.cache_data(ttl=3600)
 def get_yield_curves():
@@ -202,28 +163,10 @@ def get_yield_curves():
         try:
             long = fred.get_series(codes['10Y']).iloc[-252:]
             short = fred.get_series(codes['3M']).iloc[-252:]
-
-            # FORCE ALIGNMENT ON COMMON DATES (INNER JOIN)
-            df = pd.concat([long.rename("10Y"), short.rename("3M")], axis=1, join="inner")
-
-            # Clean & sort
-            df = df.dropna().sort_index()
-
-            if not df.empty:
-                history[zone] = df
-        except:
-            pass
+            df = pd.DataFrame({"10Y": long, "3M": short}).dropna()
+            if not df.empty: history[zone] = df
+        except: pass
     return history
-
-# New function to fetch DXY from FRED
-@st.cache_data(ttl=3600)
-def get_dxy_fred():
-    try:
-        fred = Fred(api_key=FRED_API_KEY)
-        dxy = fred.get_series("RTWEXBGS")  # Traditional DXY (Major Currencies Index)
-        return dxy
-    except:
-        return None
 
 @st.cache_data(ttl=3600)
 def get_cot_data():
@@ -246,31 +189,28 @@ def get_cot_data():
 
 @st.cache_data(ttl=600)
 def get_market_prices():
-    tickers = list(ASSET_MAP.keys())
+    # AJOUT DE ^NYICDX POUR LE DXY
+    tickers = list(ASSET_MAP.keys()) + ["^NYICDX", "DX=F", "^TNX", "^IRX"]
     try: return yf.download(tickers, period="1y", interval="1d", group_by='ticker', progress=False)
     except: return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def get_seasonality_data(tickers):
-    """CORRECTIF SAISONNALITÉ : Nettoyage et Ré-indexation 12 mois"""
     data = {}
     for t in tickers:
         try:
             df = yf.download(t, period="10y", interval="1d", progress=False)
-
-            # Nettoyage MultiIndex
             if isinstance(df.columns, pd.MultiIndex):
-                try: df = df.xs(t, axis=1, level=0)
+                try: df = df.xs(t, axis=1, level=0) 
                 except: df.columns = df.columns.droplevel(1)
-
+            
             if not df.empty and 'Close' in df.columns:
                 monthly_close = df['Close'].resample("M").last()
                 monthly_ret = monthly_close.pct_change() * 100
                 monthly_ret = monthly_ret.dropna()
-                monthly_ret.index = monthly_ret.index.to_period("M")
-                monthly_ret = monthly_ret.groupby(monthly_ret.index.month).mean()
-                monthly_ret = monthly_ret.reindex(range(1, 13), fill_value=0)
-                data[t] = monthly_ret
+                avg_ret = monthly_ret.groupby(monthly_ret.index.month).mean()
+                avg_ret = avg_ret.reindex(range(1, 13), fill_value=0)
+                data[t] = avg_ret
         except: continue
     return data
 
@@ -300,54 +240,56 @@ def calculate_matrix_row(ticker, info, macro, cot, market):
     s_cpi = calc_diff('CPI', 0.5, -0.5)
 
     # TECH
-    trend, rsi, price = 0, 50, 0
+    trend = 0
+    rsi = 50
+    price = 0
     try:
         df = market[ticker]
-        if isinstance(df.columns, pd.MultiIndex): df = df.xs(ticker, axis=1, level=0)
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.xs(ticker, axis=1, level=0)
+
         if not df.empty:
-            c = df['Close']
+            c = df["Close"]
             price = c.iloc[-1]
+
+            # SMA calculations
+            sma20 = c.rolling(20).mean()
+            sma50 = c.rolling(50).mean()
+            sma200 = c.rolling(200).mean()
+
+            # RSI
             delta = c.diff()
-            rs = (delta.where(delta>0,0)).rolling(14).mean() / (-delta.where(delta<0,0)).rolling(14).mean()
-            rsi = 100 - (100/(1+rs)).iloc[-1]
+            rs = (delta.where(delta > 0, 0)).rolling(14).mean() / (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi = 100 - (100 / (1 + rs)).iloc[-1]
 
-            # --- New Trend Indicators ---
-            # Moving Averages
-            ma20 = c.rolling(20).mean()
-            ma50 = c.rolling(50).mean()
-            ma200 = c.rolling(200).mean()
+            # Trend logic
+            trend_sma = 1 if price > sma200.iloc[-1] else -1
 
-            # 1. Slope of MA20
-            slope20 = ma20.diff().iloc[-1]
-            slope_s = 1 if slope20 > 0 else -1
+            # Slope of SMA20
+            slope20 = sma20.diff().iloc[-1]
+            trend_slope = 1 if slope20 > 0 else -1
 
-            # 2. MA50 / MA200 Crossover
-            cross_s = 1 if ma50.iloc[-1] > ma200.iloc[-1] else -1
+            # ADX
+            high = df["High"]
+            low = df["Low"]
+            close = df["Close"]
 
-            # 3. ADX Calculation
-            high = df['High']
-            low = df['Low']
-            close = df['Close']
-
-            plus_dm = (high.diff().where(lambda x: x > 0, 0)).fillna(0)
-            minus_dm = (-low.diff().where(lambda x: x < 0, 0)).fillna(0)
-            tr1 = high - low
-            tr2 = (high - close.shift()).abs()
-            tr3 = (low - close.shift()).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            plus_dm = (high.diff().where(high.diff() > low.diff(), 0)).fillna(0)
+            minus_dm = (low.diff().where(low.diff() > high.diff(), 0)).fillna(0)
+            tr = (high - low).combine((high - close.shift()).abs(), max).combine((low - close.shift()).abs(), max)
 
             atr = tr.rolling(14).mean()
-            plus_di = (plus_dm.rolling(14).mean() / atr) * 100
-            minus_di = (minus_dm.rolling(14).mean() / atr) * 100
-
-            dx = ((plus_di - minus_di).abs() / (plus_di + minus_di)) * 100
+            plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
+            minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
+            dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
             adx = dx.rolling(14).mean().iloc[-1]
 
-            adx_s = 1 if adx > 25 else -1
+            trend_adx = 1 if adx > 25 else 0
 
-            # Final Trend Score
-            trend = slope_s + cross_s + adx_s
-    except: pass
+            # Final trend score
+            trend = trend_sma + trend_slope + trend_adx
+    except:
+        pass
 
     # COT
     cot_s, net_pos, pct_long = 0, 0, 50
@@ -390,53 +332,49 @@ def plot_yield_comparison(zone_data, zone_name):
 
 def plot_dxy_base100(market):
     fig = go.Figure()
-    global dxy_fred_global
-    start_date = "2020-01-01"
-    dxy = dxy_fred_global
-    if dxy is None:
-        st.warning("DXY data not available from FRED.")
-    else:
-        dxy = dxy.dropna()
-        dxy = dxy[dxy.index >= start_date]
+    
+    # --- ALIGNEMENT TEMPOREL (Fix Bgs) ---
+    # On prend l'index commun le plus récent (ex: 1 an glissant)
+    # DXY PRIORITY: ^NYICDX
+    dxy = None
+    if "^NYICDX" in market and not market["^NYICDX"].empty:
+        dxy = market["^NYICDX"]["Close"]
+    elif "DX-Y.NYB" in market and not market["DX-Y.NYB"].empty:
+        dxy = market["DX-Y.NYB"]["Close"]
+    elif "DX=F" in market and not market["DX=F"].empty:
+        dxy = market["DX=F"]["Close"]
+    
+    if dxy is not None:
+        dxy = dxy.fillna(method='ffill').dropna()
+        # BASE 100
         if not dxy.empty:
-            dxy_base = (dxy / dxy.iloc[0]) * 100
-            fig.add_trace(go.Scatter(
-                x=dxy_base.index,
-                y=dxy_base.values,
-                name="USD Index (FRED)",
-                line=dict(color="white", width=3)
-            ))
+            base_val = dxy.iloc[0]
+            if base_val > 0:
+                dxy_b100 = (dxy / base_val) * 100
+                fig.add_trace(go.Scatter(x=dxy.index, y=dxy_b100, name="USD Index (^NYICDX)", line=dict(color="white", width=3)))
 
+    # DEVISES
     colors = {"EURUSD=X": C_BLUE, "GBPUSD=X": C_GREEN, "AUDUSD=X": "orange"}
     names = {"EURUSD=X": "EUR", "GBPUSD=X": "GBP", "AUDUSD=X": "AUD"}
+    
     for t, col in colors.items():
         try:
             s = market[t]["Close"].dropna()
-            s = s[s.index >= start_date]
+            # Alignement temporel simple: on prend tout l'historique dispo dans market (1y)
             if not s.empty:
-                s_base = (s / s.iloc[0]) * 100
-                fig.add_trace(go.Scatter(x=s_base.index, y=s_base.values, name=names[t], line=dict(color=col)))
+                s_b100 = (s / s.iloc[0]) * 100
+                fig.add_trace(go.Scatter(x=s.index, y=s_b100, name=names[t], line=dict(color=col)))
         except: pass
-    try:
-        jpy = (1 / market["USDJPY=X"]["Close"]).dropna()
-        jpy = jpy[jpy.index >= start_date]
-        if not jpy.empty:
-            jpy_base = (jpy / jpy.iloc[0]) * 100
-            fig.add_trace(go.Scatter(x=jpy_base.index, y=jpy_base.values, name="JPY", line=dict(color=C_RED)))
+        
+    try: 
+        jpy_raw = market["USDJPY=X"]["Close"].dropna()
+        if not jpy_raw.empty:
+            jpy = 1 / jpy_raw # Inversion
+            jpy_b100 = (jpy / jpy.iloc[0]) * 100
+            fig.add_trace(go.Scatter(x=jpy.index, y=jpy_b100, name="JPY", line=dict(color=C_RED)))
     except: pass
-    fig.update_layout(
-        title="Force Relative Devises (Base 100)",
-        template="plotly_dark",
-        height=400,
-        paper_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(
-            showgrid=True,
-            gridcolor="#333",
-            tickformat="%Y-%m-%d",
-            tickangle=-45,
-            dtick="M1"
-        )
-    )
+    
+    fig.update_layout(title="Force Relative Devises (Base 100)", template="plotly_dark", height=400, paper_bgcolor='rgba(0,0,0,0)')
     return fig
 
 def plot_seasonality(ticker1, ticker2, seas_db):
@@ -445,35 +383,16 @@ def plot_seasonality(ticker1, ticker2, seas_db):
     
     if ticker1 in seas_db:
         s1 = seas_db[ticker1]
-        fig.add_trace(go.Scatter(
-            x=months,
-            y=s1.values,
-            name=ASSET_MAP.get(ticker1, {'name': ticker1})['name'],
-            mode="lines+markers",
-            line=dict(color=C_BLUE, width=3)
-        ))
+        fig.add_trace(go.Scatter(x=months, y=s1.values, name=ASSET_MAP.get(ticker1, {'name':ticker1})['name'], mode='lines+markers', line=dict(color=C_BLUE, width=3)))
         
-    # Chart Ticker 2 (Ligne)
     if ticker2 and ticker2 in seas_db:
         s2 = seas_db[ticker2]
-        fig.add_trace(go.Scatter(x=months, y=s2.values, name=ASSET_MAP.get(ticker2, {'name':ticker2})['name'], line=dict(color=C_GREEN, width=3)))
+        fig.add_trace(go.Scatter(x=months, y=s2.values, name=ASSET_MAP.get(ticker2, {'name':ticker2})['name'], line=dict(color=C_GREEN, width=3, dash='dot')))
 
-    # Marqueur mois actuel
-    current_month_idx = datetime.now().month - 1
-    fig.add_shape(type="line", x0=current_month_idx, x1=current_month_idx, y0=-5, y1=5, line=dict(color="white", width=1, dash="dot"))
+    curr_idx = datetime.now().month - 1
+    fig.add_shape(type="line", x0=curr_idx, x1=curr_idx, y0=-5, y1=5, line=dict(color="white", width=1, dash="dot"))
+    fig.add_annotation(x=curr_idx, y=5, text="Actuel", showarrow=False, font=dict(color="white"))
     
-    # Dynamic Y-axis scaling
-    y_values = []
-    if ticker1 in seas_db:
-        y_values.extend(seas_db[ticker1].values.tolist())
-    if ticker2 and ticker2 in seas_db:
-        y_values.extend(seas_db[ticker2].values.tolist())
-
-    if y_values:
-        y_min = min(y_values)
-        y_max = max(y_values)
-        fig.update_yaxes(range=[y_min * 1.1, y_max * 1.1])
-
     fig.update_layout(title="Saisonnalité Moyenne (10 Ans)", template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', height=450)
     return fig
 
@@ -483,7 +402,7 @@ def plot_seasonality(ticker1, ticker2, seas_db):
 
 def main():
     c1, c2 = st.columns([3, 1])
-    with c1: st.title("🦅 OPTIWEALTH TERMINAL v13")
+    with c1: st.title("🦅 OPTIWEALTH TERMINAL v16")
     with c2: zone = st.selectbox("Zone Économique", list(MACRO_ZONES_DISPLAY.keys()))
     
     banner = get_banner_data(zone)
@@ -492,7 +411,7 @@ def main():
         cols[0].metric("Taux Directeur", f"{banner['Rate']:.2f}%")
         cols[1].metric("Inflation (CPI)", f"{banner['CPI']:.1f}%")
         cols[2].metric("Chômage", f"{banner['Unemp']:.1f}%")
-        cols[3].metric("GDP (YoY)", f"{banner['GDP']:.2f}%")
+        cols[3].metric("GDP (YoY)", f"{banner['GDP']:.1f}%")
         cols[4].metric("M2 Supply", f"{banner['M2']:.1f}%")
 
     st.markdown("---")
@@ -501,7 +420,6 @@ def main():
         macro_db = get_macro_db()
         cot_db = get_cot_data()
         market_db = get_market_prices()
-        dxy_fred = get_dxy_fred()
         yields_db = get_yield_curves()
         seas_db = get_seasonality_data(list(ASSET_MAP.keys()))
 
@@ -516,7 +434,7 @@ def main():
 
     tab_matrix, tab_money, tab_seas, tab_scan = st.tabs(["🌍 MATRICE MACRO", "💸 MONEY FLOW", "📅 SAISONNALITÉ", "🚀 SCANNER"])
 
-    # TAB 1: MATRICE (RESTORE PROGRESS BAR)
+    # TAB 1: MATRICE
     with tab_matrix:
         st.subheader("Matrice de Différentiel")
         
@@ -551,11 +469,8 @@ def main():
                 with cols[i%3]:
                     st.markdown(f"""<div class="news-item"><div style="font-weight:bold;">{n['title'][:60]}...</div><div style="font-size:11px; color:#888;">{n['source']['name']}</div><a href="{n['url']}" class="news-link" target="_blank">Lire</a></div>""", unsafe_allow_html=True)
 
-    # TAB 2: MONEY FLOW (INDENTATION CORRIGÉE)
+    # TAB 2: MONEY FLOW
     with tab_money:
-        global dxy_fred_global
-        dxy_fred_global = dxy_fred
-
         st.subheader("1. Force Relative")
         st.plotly_chart(plot_dxy_base100(market_db), use_container_width=True)
         st.subheader("2. Yield Curve Control (10Y vs 3M)")
@@ -572,7 +487,7 @@ def main():
         if "Japan 🇯🇵" in yields_db: 
             with yc4: st.plotly_chart(plot_yield_comparison(yields_db["Japan 🇯🇵"], "Japan"), use_container_width=True)
 
-    # TAB 3: SEASONALITY (BUG FIXÉ)
+    # TAB 3: SEASONALITY
     with tab_seas:
         st.subheader("📅 Analyse Saisonnière (10 Ans)")
         c_sel1, c_sel2 = st.columns(2)
@@ -581,57 +496,42 @@ def main():
         comp = None if asset2 == "Aucun" else asset2
         st.plotly_chart(plot_seasonality(asset1, comp, seas_db), use_container_width=True)
 
-        # Infos importantes sous le graphique
-        def compute_stats(ticker):
-            s = seas_db.get(ticker)
-            if s is None:
-                return None
-            mean_val = s.mean()
-            std_val = s.std()
-            best_month = s.idxmax()
-            worst_month = s.idxmin()
-            return mean_val, std_val, best_month, worst_month
+        # STATS
+        def get_stats(t):
+            if t not in seas_db: return None
+            s = seas_db[t]
+            return s.mean(), s.std(), s.idxmax(), s.idxmin()
 
-        stats1 = compute_stats(asset1)
-        stats2 = compute_stats(comp) if comp else None
+        s1 = get_stats(asset1)
+        s2 = get_stats(comp) if comp else None
 
-        months_map = {
-            1: "Jan", 2: "Fév", 3: "Mar", 4: "Avr", 5: "Mai", 6: "Juin",
-            7: "Juil", 8: "Août", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Déc"
-        }
+        colA, colB = st.columns(2)
 
-        if stats1:
-            mean1, std1, best1, worst1 = stats1
-            st.markdown("## 🔎 Informations Clés (10 Ans)")
-            colA, colB = st.columns(2)
-
+        if s1:
+            mean, std, best, worst = s1
+            months_map = {1:"Jan", 2:"Fév", 3:"Mar", 4:"Avr", 5:"Mai", 6:"Juin", 7:"Juil", 8:"Août", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Déc"}
             with colA:
                 st.markdown(f"""
-<div style="background-color:#161b22; padding:15px; border-radius:8px; border-left:4px solid {C_BLUE};">
-<h3 style="margin:0; color:white;"> {ASSET_MAP.get(asset1, {'name': asset1})['name']}</h3>
-<p style="font-size:16px; margin-top:10px;">
-<b>Rendement moyen :</b> <span style="font-size:20px; font-weight:700; color:{C_GREEN};">{mean1:.2f}%</span><br>
-<b>Écart-type :</b> <span style="font-size:20px; font-weight:700;">{std1:.2f}</span><br>
-<b>Meilleur mois :</b> <span style="font-weight:700; color:{C_GREEN};">{months_map.get(best1)}</span> ({seas_db[asset1][best1]:.2f}%)<br>
-<b>Pire mois :</b> <span style="font-weight:700; color:{C_RED};">{months_map.get(worst1)}</span> ({seas_db[asset1][worst1]:.2f}%)
-</p>
-</div>
-""", unsafe_allow_html=True)
+                <div style="background-color:#161b22; padding:15px; border-radius:5px; border-left:4px solid {C_BLUE};">
+                    <h4 style="margin:0;">📊 {ASSET_MAP[asset1]['name']}</h4>
+                    <p><b>Moyenne :</b> {mean:.2f}%<br>
+                    <b>Volatilité :</b> {std:.2f}<br>
+                    <b>Top Mois :</b> <span style="color:{C_GREEN}">{months_map[best]}</span><br>
+                    <b>Flop Mois :</b> <span style="color:{C_RED}">{months_map[worst]}</span></p>
+                </div>""", unsafe_allow_html=True)
 
-            if stats2:
-                mean2, std2, best2, worst2 = stats2
-                with colB:
-                    st.markdown(f"""
-<div style="background-color:#161b22; padding:15px; border-radius:8px; border-left:4px solid {C_BLUE};">
-<h3 style="margin:0; color:white;"> {ASSET_MAP.get(comp, {'name': comp})['name']}</h3>
-<p style="font-size:16px; margin-top:10px;">
-<b>Rendement moyen :</b> <span style="font-size:20px; font-weight:700; color:{C_GREEN};">{mean2:.2f}%</span><br>
-<b>Écart-type :</b> <span style="font-size:20px; font-weight:700;">{std2:.2f}</span><br>
-<b>Meilleur mois :</b> <span style="font-weight:700; color:{C_GREEN};">{months_map.get(best2)}</span> ({seas_db[comp][best2]:.2f}%)<br>
-<b>Pire mois :</b> <span style="font-weight:700; color:{C_RED};">{months_map.get(worst2)}</span> ({seas_db[comp][worst2]:.2f}%)
-</p>
-</div>
-""", unsafe_allow_html=True)
+        if s2:
+            mean2, std2, best2, worst2 = s2
+            months_map = {1:"Jan", 2:"Fév", 3:"Mar", 4:"Avr", 5:"Mai", 6:"Juin", 7:"Juil", 8:"Août", 9:"Sep", 10:"Oct", 11:"Nov", 12:"Déc"}
+            with colB:
+                st.markdown(f"""
+                <div style="background-color:#161b22; padding:15px; border-radius:5px; border-left:4px solid {C_GREEN};">
+                    <h4 style="margin:0;">📊 {ASSET_MAP[comp]['name']}</h4>
+                    <p><b>Moyenne :</b> {mean2:.2f}%<br>
+                    <b>Volatilité :</b> {std2:.2f}<br>
+                    <b>Top Mois :</b> <span style="color:{C_GREEN}">{months_map[best2]}</span><br>
+                    <b>Flop Mois :</b> <span style="color:{C_RED}">{months_map[worst2]}</span></p>
+                </div>""", unsafe_allow_html=True)
 
     # TAB 4: SCANNER
     with tab_scan:
