@@ -7,7 +7,8 @@ from fredapi import Fred
 import warnings
 from datetime import datetime
 import numpy as np
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 # Désactivation des warnings
 warnings.filterwarnings("ignore")
 
@@ -116,6 +117,7 @@ ASSET_MAP = {
     "USDCHF=X": {"name": "USD/CHF", "base": "USD", "quote": "CHF", "cftc": "SWISS FRANC", "inv_cftc": True},
     "AUDJPY=X": {"name": "AUD/JPY", "base": "AUD", "quote": "JPY", "cftc": None},
     "EURJPY=X": {"name": "EUR/JPY", "base": "EUR", "quote": "JPY", "cftc": None},
+    "EURCHF=X": {"name": "EUR/CHF", "base": "EUR", "quote": "CHF", "cftc": None},
     "^GSPC":    {"name": "S&P 500", "base": "USD", "quote": "USD", "cftc": "E-MINI S&P 500"},
     "GC=F":     {"name": "GOLD",    "base": "USD", "quote": "USD", "cftc": "GOLD"},
 }
@@ -173,18 +175,38 @@ def get_cot_data():
     url = "https://www.cftc.gov/dea/newcot/FinFutWk.txt"
     headers = {"User-Agent": "Mozilla/5.0"}
     data = {}
+
     try:
         r = requests.get(url, headers=headers, verify=False, timeout=10)
         if r.status_code == 200:
-            for line in r.text.split('\n'):
-                row = line.split(',')
-                if len(row) > 10:
-                    name = row[0].strip().replace('"', '')
+            import io
+            df = pd.read_csv(io.StringIO(r.text), dtype=str)
+
+            # Normalisation des noms de colonnes (certaines contiennent des espaces)
+            df.columns = [c.strip().replace(" ", "_").lower() for c in df.columns]
+
+            # Colonnes CFTC généralement présentes
+            name_col = "market_and_exchange_names"
+            long_col = "noncommercial_long"
+            short_col = "noncommercial_short"
+
+            if name_col in df.columns and long_col in df.columns and short_col in df.columns:
+                for _, row in df.iterrows():
                     try:
-                        longs, shorts = float(row[7].strip()), float(row[8].strip())
-                        data[name] = {"Net": longs - shorts, "Total": longs+shorts, "Longs": longs, "Shorts": shorts}
-                    except: continue
-    except: pass
+                        name = str(row[name_col]).strip()
+                        longs = float(row[long_col])
+                        shorts = float(row[short_col])
+                        data[name] = {
+                            "Net": longs - shorts,
+                            "Total": longs + shorts,
+                            "Longs": longs,
+                            "Shorts": shorts
+                        }
+                    except:
+                        continue
+    except:
+        pass
+
     return data
 
 @st.cache_data(ttl=600)
@@ -416,6 +438,60 @@ def main():
 
     st.markdown("---")
 
+    st.markdown(
+        """
+        <style>
+            .poly-container {
+                display: flex;
+                flex-wrap: nowrap;
+                justify-content: space-between;
+                gap: 10px;
+            }
+            .poly-item {
+                flex: 1;
+                max-width: 24%;
+                background-color: #0e1117;
+                border-radius: 6px;
+                padding: 0;
+            }
+            .poly-item iframe {
+                width: 100%;
+                height: 180px;
+                border: none;
+                background-color: #0e1117;
+            }
+        </style>
+
+        <div class="poly-container">
+            <div class="poly-item">
+                <iframe
+                    title="polymarket-market-iframe"
+                    src="https://embed.polymarket.com/market.html?market=fed-decreases-interest-rates-by-25-bps-after-december-2025-meeting&features=volume&theme=light"
+                ></iframe>
+            </div>
+            <div class="poly-item">
+                <iframe
+                    title="polymarket-market-iframe"
+                    src="https://embed.polymarket.com/market.html?market=will-the-ecb-announce-no-change-at-the-december-meeting&features=volume&theme=light"
+                ></iframe>
+            </div>
+            <div class="poly-item">
+                <iframe
+                    title="polymarket-market-iframe"
+                    src="https://embed.polymarket.com/market.html?market=bank-of-japan-increases-interest-rates-by-25-bps-after-december-2025-meeting&features=volume&theme=light"
+                ></iframe>
+            </div>
+            <div class="poly-item">
+                <iframe
+                    title="polymarket-market-iframe"
+                    src="https://embed.polymarket.com/market.html?market=will-the-bank-of-canada-announce-no-change-at-the-december-meeting&features=volume&theme=light"
+                ></iframe>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     with st.spinner("Synchronisation..."):
         macro_db = get_macro_db()
         cot_db = get_cot_data()
@@ -474,7 +550,7 @@ def main():
         st.subheader("1. Force Relative")
         st.plotly_chart(plot_dxy_base100(market_db), use_container_width=True)
         st.subheader("2. Yield Curve Control (10Y vs 3M)")
-        
+
         yc1, yc2 = st.columns(2)
         yc3, yc4 = st.columns(2)
         
@@ -486,6 +562,33 @@ def main():
             with yc3: st.plotly_chart(plot_yield_comparison(yields_db["UK 🇬🇧"], "UK"), use_container_width=True)
         if "Japan 🇯🇵" in yields_db: 
             with yc4: st.plotly_chart(plot_yield_comparison(yields_db["Japan 🇯🇵"], "Japan"), use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("3. Corrélation des Devises (1 an)")
+
+        try:
+            # Extraction des clôtures pour toutes les paires Forex disponibles
+            fx_pairs = [t for t in ASSET_MAP.keys() if "=X" in t]
+            closes = {}
+
+            for t in fx_pairs:
+                try:
+                    df_t = market_db[t]
+                    if isinstance(df_t.columns, pd.MultiIndex):
+                        df_t = df_t.xs(t, axis=1, level=0)
+                    closes[t] = df_t["Close"]
+                except:
+                    continue
+            df_close = pd.DataFrame(closes).dropna()
+            corr = df_close.corr()
+
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            sns.heatmap(corr, annot=True, cmap="coolwarm", center=0, ax=ax)
+            st.pyplot(fig)
+
+        except Exception as e:
+            st.error(f"Erreur corrélation : {e}")
 
     # TAB 3: SEASONALITY
     with tab_seas:
